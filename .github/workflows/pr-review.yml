@@ -1,44 +1,50 @@
 name: PR Review
-
 on:
-  pull_request_target:
-    types: [opened, ready_for_review]
   issue_comment:
     types: [created]
   pull_request_review_comment:
     types: [created]
+  workflow_run:
+    workflows: ["PR Review - Trigger"]
+    types: [completed]
 
-# Serialize reviews per PR; do not cancel in-progress runs
-# so no review is silently dropped mid-execution.
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.event.issue.number }}
-  cancel-in-progress: false
+permissions:
+  contents: read
 
 jobs:
-  review:
-    # Only run on the upstream repo (not forks) to prevent credential leaks.
-    # Skip draft PRs (ready_for_review will fire when promoted).
-    # Skip bot actors to avoid reviewing Dependabot and automation PRs.
-    # Require collaborator-level access for comment-triggered events.
-    # Only trigger on PR comments, not plain issue comments.
-    if: >-
-      github.repository == 'docker/compose' &&
-      (github.event_name != 'pull_request_target' || github.event.pull_request.draft == false) &&
-      (github.event_name == 'pull_request_target' ||
-       (github.event_name == 'issue_comment' &&
-        github.event.issue.pull_request &&
-        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)) ||
-       (github.event_name == 'pull_request_review_comment' &&
-        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association))) &&
-      !endsWith(github.actor, '[bot]')
-    uses: docker/cagent-action/.github/workflows/review-pr.yml@3a12dbd0c6cd7dda3d4e05f24f0143c9701456de # v1.2.13
-    secrets:
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-      CAGENT_ORG_MEMBERSHIP_TOKEN: ${{ secrets.CAGENT_ORG_MEMBERSHIP_TOKEN }}
-      CAGENT_REVIEWER_APP_ID: ${{ secrets.CAGENT_REVIEWER_APP_ID }}
-      CAGENT_REVIEWER_APP_PRIVATE_KEY: ${{ secrets.CAGENT_REVIEWER_APP_PRIVATE_KEY }}
+  get-pr-context:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    outputs:
+      pr-number: ${{ steps.pr.outputs.number }}
+    steps:
+      - name: Download PR context
+        if: github.event_name == 'workflow_run'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: pr-review-context
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+
+      - name: Read PR number
+        id: pr
+        if: github.event_name == 'workflow_run'
+        run: echo "number=$(cat pr_number.txt)" >> $GITHUB_OUTPUT
+
+  run-docker-agent:
+    needs: [get-pr-context]
+    if: |
+      always() && (
+        github.event_name == 'issue_comment' ||
+        github.event_name == 'pull_request_review_comment' ||
+        needs.get-pr-context.result == 'success'
+      )
+    uses: docker/cagent-action/.github/workflows/review-pr.yml@d98096f432f2aea5091c811852c4da804e60623a # v1.4.1
     permissions:
-      contents: read       # to fetch code
-      pull-requests: write # to post review comments
-      issues: write        # to reply to issue/PR comments
-      checks: write        # to update check statuses
+      contents: read
+      pull-requests: write
+      issues: write
+      checks: write
+      id-token: write
+    with:
+      pr-number: ${{ needs.get-pr-context.outputs.pr-number }}
